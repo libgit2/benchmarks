@@ -1,0 +1,25 @@
+.main {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4rem;
+  gap: 2rem;
+  min-height: 100vh;
+}
+
+.picker {
+  display: flex;
+  flex-direction: row;
+  border: solid 1px #cccccc;
+  padding: 1rem 1.5rem;
+  gap: 1.5rem;
+}
+
+.testPicker select {
+  margin-left: 0.5rem;
+  width: 15rem;
+}
+.platformPicker select {
+  margin-left: 0.5rem;
+}
