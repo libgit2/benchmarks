@@ -28,7 +28,7 @@ export default function HistoryPage() {
     (async () => {
       const testNames = [ ];
 
-      const res = await fetch(`http://localhost:3000/api/platforms/${platform}.json`);
+      const res = await fetch(`/api/platforms/${platform}.json`);
 
       if (! res.ok) {
         throw new Error(`failed to fetch data: ${res.status}`);

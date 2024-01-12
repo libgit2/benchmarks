@@ -28,7 +28,7 @@ export default function ComparisonPage() {
 
   useEffect(() => {
     async function fetchData() {
-      const res = await fetch(`http://localhost:3000/api/runs/${date}/${platform}.json`);
+      const res = await fetch(`/api/runs/${date}/${platform}.json`);
 
       if (! res.ok) {
         throw new Error(`failed to fetch data: ${res.status}`);
