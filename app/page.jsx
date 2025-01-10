@@ -41,6 +41,8 @@ export default function ComparisonPage() {
         date: date,
         results: comparisonResults
       });
+
+      router.push(`?platform=${platform}&date=${date}`);
     }
 
     fetchData();

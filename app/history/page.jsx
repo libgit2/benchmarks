@@ -23,6 +23,7 @@ export default function HistoryPage() {
   const [ testName, setTestName ] = useState(startingTestName);
   const [ testNames, setTestNames ] = useState();
   const [ historyData, setHistoryData ] = useState();
+  const router = useRouter();
 
   useEffect(() => {
     (async () => {
@@ -45,6 +46,8 @@ export default function HistoryPage() {
         platform: platform,
         results: historyResults
       });
+
+      router.push(`?test=${testName}&platform=${platform}`);
     })();
   }, [ platform, testName ]);
 
