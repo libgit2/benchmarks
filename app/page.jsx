@@ -1,12 +1,12 @@
 'use client';
 
 import { redirect, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 import ComparisonChart from '../components/comparison_chart';
 import styles from './page.module.css';
 
-export default function ComparisonPage() {
+function ComparisonResults() {
   const searchParams = useSearchParams();
   let startingPlatform = searchParams.get('platform');
   let startingDate = searchParams.get('date');
@@ -85,5 +85,13 @@ export default function ComparisonPage() {
         }
       </div>
     </main>
+  );
+}
+
+export default function ComparisonPage() {
+  return (
+    <Suspense>
+      <ComparisonResults />
+    </Suspense>
   );
 }

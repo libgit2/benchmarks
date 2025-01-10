@@ -1,12 +1,12 @@
 'use client';
 
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 
 import HistoryChart from '../../components/history_chart';
 import styles from './page.module.css';
 
-export default function HistoryPage() {
+function HistoryResults() {
   const searchParams = useSearchParams();
   let startingTestName = searchParams.get('test');
   let startingPlatform = searchParams.get('platform');
@@ -100,5 +100,13 @@ export default function HistoryPage() {
         }
       </div>
     </main>
+  );
+}
+
+export default function HistoryPage() {
+  return (
+    <Suspense>
+      <HistoryResults />
+    </Suspense>
   );
 }
