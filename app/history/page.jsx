@@ -38,8 +38,12 @@ export default function HistoryPage() {
       const historyResults = await res.json();
 
       historyResults.tests.forEach((test) => {
-        testNames.push(test.name);
+        if (test && test.name) {
+          testNames.push(test.name);
+        }
       });
+
+      testNames.sort();
 
       setTestNames(testNames);
       setHistoryData({
