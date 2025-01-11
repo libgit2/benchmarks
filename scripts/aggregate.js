@@ -11,12 +11,14 @@ const dates = fs.readdirSync(runsDir);
 for (const date of dates) {
   fs.readdirSync(`${runsDir}/${date}`,
     { withFileTypes: true }).forEach((item) => {
-        const platform = item.name.replace(/\.json$/, '');
-        results.push({
-          date: date,
-          platform: platform,
-          file: `${item.path}/${item.name}`
-        });
+        if (item.name.endsWith('.json')) {
+          const platform = item.name.replace(/\.json$/, '');
+          results.push({
+            date: date,
+            platform: platform,
+            file: `${item.path}/${item.name}`
+          });
+        }
     }
   );
 }
