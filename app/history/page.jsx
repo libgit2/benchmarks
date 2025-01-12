@@ -27,8 +27,6 @@ function HistoryResults() {
 
   useEffect(() => {
     (async () => {
-      const testNames = [ ];
-
       const res = await fetch(`/api/platforms/${platform}.json`);
 
       if (! res.ok) {
@@ -36,14 +34,7 @@ function HistoryResults() {
       }
 
       const historyResults = await res.json();
-
-      historyResults.tests.forEach((test) => {
-        if (test && test.name) {
-          testNames.push(test.name);
-        }
-      });
-
-      testNames.sort();
+      const testNames = Object.keys(historyResults.tests).sort();
 
       setTestNames(testNames);
       setHistoryData({

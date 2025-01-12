@@ -3,7 +3,10 @@
 const fs = require('node:fs');
 
 const runsDir = 'public/api/runs';
+const testsDir = 'public/api/tests';
 const platformsDir = 'public/api/platforms';
+
+const daysToKeep = 60;
 
 const results = [ ];
 const dates = fs.readdirSync(runsDir);
@@ -11,69 +14,87 @@ const dates = fs.readdirSync(runsDir);
 for (const date of dates) {
   fs.readdirSync(`${runsDir}/${date}`,
     { withFileTypes: true }).forEach((item) => {
-        if (item.name.endsWith('.json')) {
-          const platform = item.name.replace(/\.json$/, '');
-          results.push({
-            date: date,
-            platform: platform,
-            file: `${item.path}/${item.name}`
-          });
-        }
+      if (item.name.endsWith('.json')) {
+        const platform = item.name.replace(/\.json$/, '');
+        results.push({
+          date: date,
+          platform: platform,
+          file: `${item.path}/${item.name}`
+        });
+      }
     }
   );
 }
 
-const platforms =
-  results.map((item) => item.platform).
-          filter((item, idx, array) => array.indexOf(item) === idx);
+/* Create aggregations */
+const platforms = { };
+const tests = { };
 
-/* Create historical data for each platform */
-for (const platform of platforms)
-{
-  let historical = { system: { }, executor: { }, tests: [ ] };
+for (const item of results) {
+  const data = JSON.parse(fs.readFileSync(item.file));
 
-  for (const item of results.filter((item) => item.platform === platform)) {
-    const data = JSON.parse(fs.readFileSync(item.file));
+  /* Aggregate by platform */
+  for (const test of data.tests) {
+    if (! platforms[item.platform]) {
+      platforms[item.platform] = {
+        'executor': data.executor,
+        'tests': { }
+      };
+    }
 
-    historical.system = data.system;
-    historical.executor = data.executor;
+    if (! platforms[item.platform]['tests'][test.name]) {
+      platforms[item.platform]['tests'][test.name] = { };
+    }
 
-    data.tests.forEach((test) => {
-      const results = [ ];
+    platforms[item.platform]['tests'][test.name][item.date] = test;
+  }
 
-      test.results.map((result) => {
-        results.push({
-          command: result.command,
-          history: [
-            {
-              date: item.date,
-              mean: result.mean,
-              stddev: result.stddev
-            }
-          ]
-        });
-      });
+  /* Aggregate by test */
+  for (const test of data.tests) {
+    if (! tests[test.name]) {
+      tests[test.name] = { };
+    }
 
-      let found = false;
-      historical.tests.map((item) => {
-        if (item.name === test.name) {
-          for (let i in results) {
-            item.results[i].command = results[i].command;
-            item.results[i].history.push(results[i].history[0]);
-          }
-          found = true;
-        }
-      } );
+    if (! tests[test.name][item.platform]) {
+      tests[test.name][item.platform] = { };
+    }
 
-      if (!found) {
-        historical.tests.push({
-          name: test.name,
-          results: results
-        });
-      }
-    });
+    tests[test.name][item.platform][item.date] = test;
+  }
+}
+
+/* Update the platforms api */
+for (const platform in platforms) {
+  for (const test in platforms[platform]['tests']) {
+    /* Identify test runs for the last 60 days */
+    const dates = Object.keys(platforms[platform]['tests'][test]).sort().filter(
+      (v, i, arr) => arr.indexOf(v) === i
+    ).slice(0 - daysToKeep);
+
+    /* Filter to the 60 days identified above */
+    const filtered = Object.fromEntries(Object.entries(platforms[platform]['tests'][test]).filter(([k, v]) => dates.indexOf(k) >= 0));
+
+    platforms[platform]['tests'][test] = filtered;
   }
 
   fs.mkdirSync(platformsDir, { recursive: true });
-  fs.writeFileSync(`${platformsDir}/${platform}.json`, JSON.stringify(historical));
+  fs.writeFileSync(`${platformsDir}/${platform}.json`, JSON.stringify(platforms[platform]));
+}
+
+/* Update the tests api */
+for (const test in tests) {
+  fs.rmSync(`${testsDir}/${test}`, { recursive: true, force: true });
+
+  for (const platform in tests[test]) {
+    /* Identify test runs for the last 60 days */
+    const dates = Object.keys(tests[test][platform]).sort().filter(
+      (v, i, arr) => arr.indexOf(v) === i
+    ).slice(0 - daysToKeep);
+
+    /* Filter to the 60 days identified above */
+    const filtered = Object.fromEntries(Object.entries(tests[test][platform]).filter(([k, v]) => dates.indexOf(k) >= 0));
+
+    fs.mkdirSync(`${testsDir}/${test}`, { recursive: true });
+    fs.writeFileSync(`${testsDir}/${test}/${platform}.json`, JSON.stringify(filtered));
+  }
 }

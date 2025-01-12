@@ -23,8 +23,6 @@ ChartJS.register(
 );
 
 export default function HistoryChart({ testName, historyData }) {
-  let testData;
-
   const scrubName = (n) => { return n.replace(/^git2$/, 'libgit2'); };
 
   const executors = [
@@ -34,34 +32,25 @@ export default function HistoryChart({ testName, historyData }) {
   const dates = [ ];
   const results = [ [ ], [ ] ];
 
-  for (let test of historyData.tests) {
-    if (test.name === testName) {
-      testData = test;
-      break;
-    }
-  }
+  const testData = historyData.tests[testName];
 
   if (!testData) {
     throw new Error(`could not find ${testName}`);
   }
 
-  for (let i = 0; i < testData.results[1].history.length; i++) {
-    const baselineDay = testData.results[0].history[i];
-    const challengeDay = testData.results[1].history[i];
+  for (const date of Object.keys(testData)) {
+    dates.push(date);
 
-    if (baselineDay.date !== challengeDay.date) {
-      throw new Error("misaligned baseline and challenge");
-    }
-
-    dates.push(challengeDay.date);
+    const baseline = testData[date].results[0];
+    const challenge = testData[date].results[1];
 
     results[0].push({
-      mean: baselineDay.mean,
-      stddev: baselineDay.stddev,
+      mean: baseline.mean,
+      stddev: baseline.stddev,
     });
     results[1].push({
-      mean: challengeDay.mean,
-      stddev: challengeDay.stddev,
+      mean: challenge.mean,
+      stddev: challenge.stddev,
     });
   }
 
