@@ -26,6 +26,28 @@ for (const date of dates) {
   );
 }
 
+function setHierarchy(obj, hierarchy, value) {
+    let o = obj;
+
+    for (const h of hierarchy.slice(0, -1)) {
+        if (! o[h]) {
+            o[h] = { };
+        }
+
+        o = o[h];
+    }
+
+    o[hierarchy[hierarchy.length - 1]] = value;
+}
+
+function limit(arr, count) {
+    const all = Object.keys(arr).sort().filter(
+      (v, i, arr) => arr.indexOf(v) === i
+    ).slice(0 - count);
+
+    return Object.fromEntries(Object.entries(arr).filter(([k, v]) => all.indexOf(k) >= 0));
+}
+
 /* Create aggregations */
 const platforms = { };
 const tests = { };
@@ -35,31 +57,13 @@ for (const item of results) {
 
   /* Aggregate by platform */
   for (const test of data.tests) {
-    if (! platforms[item.platform]) {
-      platforms[item.platform] = {
-        'executor': data.executor,
-        'tests': { }
-      };
-    }
-
-    if (! platforms[item.platform]['tests'][test.name]) {
-      platforms[item.platform]['tests'][test.name] = { };
-    }
-
-    platforms[item.platform]['tests'][test.name][item.date] = test;
+    setHierarchy(platforms, [ item.platform, 'tests', test.name, item.date ], test);
+    platforms[item.platform].executor = data.executor;
   }
 
   /* Aggregate by test */
   for (const test of data.tests) {
-    if (! tests[test.name]) {
-      tests[test.name] = { };
-    }
-
-    if (! tests[test.name][item.platform]) {
-      tests[test.name][item.platform] = { };
-    }
-
-    tests[test.name][item.platform][item.date] = test;
+    setHierarchy(tests, [ test.name, item.platform, item.date ], test);
   }
 }
 
@@ -67,14 +71,7 @@ for (const item of results) {
 for (const platform in platforms) {
   for (const test in platforms[platform]['tests']) {
     /* Identify test runs for the last 60 days */
-    const dates = Object.keys(platforms[platform]['tests'][test]).sort().filter(
-      (v, i, arr) => arr.indexOf(v) === i
-    ).slice(0 - daysToKeep);
-
-    /* Filter to the 60 days identified above */
-    const filtered = Object.fromEntries(Object.entries(platforms[platform]['tests'][test]).filter(([k, v]) => dates.indexOf(k) >= 0));
-
-    platforms[platform]['tests'][test] = filtered;
+    platforms[platform]['tests'][test] = limit(platforms[platform]['tests'][test], daysToKeep);
   }
 
   fs.mkdirSync(platformsDir, { recursive: true });
@@ -87,12 +84,7 @@ for (const test in tests) {
 
   for (const platform in tests[test]) {
     /* Identify test runs for the last 60 days */
-    const dates = Object.keys(tests[test][platform]).sort().filter(
-      (v, i, arr) => arr.indexOf(v) === i
-    ).slice(0 - daysToKeep);
-
-    /* Filter to the 60 days identified above */
-    const filtered = Object.fromEntries(Object.entries(tests[test][platform]).filter(([k, v]) => dates.indexOf(k) >= 0));
+    const filtered = limit(tests[test][platform], daysToKeep);
 
     fs.mkdirSync(`${testsDir}/${test}`, { recursive: true });
     fs.writeFileSync(`${testsDir}/${test}/${platform}.json`, JSON.stringify(filtered));
