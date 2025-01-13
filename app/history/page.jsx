@@ -86,7 +86,10 @@ function HistoryResults() {
       <div className={styles.chart}>
         {
           historyData && historyData.results ?
-            <HistoryChart testName={testName} historyData={historyData.results} /> :
+            <HistoryChart testName={testName} historyData={historyData.results}
+             onClick={ (date) => {
+               router.push(`/test/${testName}?platform=${platform}&date=${date}`);
+             }} /> :
             <div />
         }
       </div>

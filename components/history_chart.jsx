@@ -22,7 +22,7 @@ ChartJS.register(
   Legend
 );
 
-export default function HistoryChart({ testName, historyData }) {
+export default function HistoryChart({ testName, historyData, onClick }) {
   const scrubName = (n) => { return n.replace(/^git2$/, 'libgit2'); };
 
   const executors = [
@@ -115,6 +115,14 @@ export default function HistoryChart({ testName, historyData }) {
                 }
               }
             },
+          },
+          onClick: (e) => {
+            const item = e.chart.getElementsAtEventForMode(e,
+              'nearest', { intersect: true }, true);
+
+            if (onClick && item.length != 0) {
+              onClick(e.chart.data.labels[item[0].index]);
+            }
           },
           plugins: {
             tooltip: {
