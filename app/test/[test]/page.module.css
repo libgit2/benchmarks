@@ -1,0 +1,157 @@
+.main {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4rem;
+  gap: 2rem;
+  min-height: 100vh;
+}
+
+.picker {
+  display: flex;
+  flex-direction: row;
+  border: solid 1px #cccccc;
+  padding: 1rem 1.5rem;
+  gap: 1.5rem;
+}
+
+.testPicker select {
+  margin-left: 0.5rem;
+  width: 15rem;
+}
+.platformPicker select {
+  margin-left: 0.5rem;
+}
+.datePicker input {
+  margin-left: 0.5rem;
+}
+
+table.run {
+  border-collapse: collapse;
+}
+thead.executionHeader {
+}
+thead.executionHeader th {
+  padding: 0.25rem 0.75rem;
+}
+th.executionHeaderCliName,
+th.executionHeaderBaselineName {
+  border-top: solid 1px #777777;
+}
+th.executionHeaderCliName,
+th.executionHeaderCliVersion {
+  border-left: solid 1px #777777;
+}
+th.executionHeaderVersion {
+  border-bottom: solid 1px #7777777;
+}
+thead.executionHeader th:first-of-type {
+  border-right: none;
+}
+thead.executionHeader th {
+  border-right: solid 1px rgba(0, 0, 0, 0.05);
+}
+thead.executionHeader th:last-of-type {
+  border-right: solid 1px #777777;
+}
+th.executionHeaderCliName:before {
+  content: 'libgit2:';
+  padding-right: 0.35rem;
+}
+th.executionHeaderCliName:after {
+  content: 'CLI';
+  padding-left: 0.25rem;
+}
+th.executionHeaderBaselineName:before {
+  content: 'Baseline:';
+  padding-right: 0.35rem;
+}
+thead.executionHeader th.executionHeaderName {
+  background-color: rgba(55, 125, 205, 0.25);
+  text-align: left;
+  padding-top: 0.5rem;
+}
+thead.executionHeader th.executionHeaderVersion {
+  background-color: rgba(55, 125, 205, 0.25);
+  text-align: left;
+  font-weight: normal;
+  padding-bottom: 0.5rem;
+}
+.executionHeaderCommit:before {
+  content: '(';
+}
+.executionHeaderCommit {
+  padding-left: 0.35rem;
+  font-family: Monaco, Courier, monospace;
+  font-size: 15px;
+  color: rgba(0, 0, 0, 0.6);
+}
+.executionHeaderCommit:after {
+  content: ')';
+}
+th.executionResultsHeader {
+  background-color: rgba(241, 80, 47, 0.25);
+  text-align: right;
+  vertical-align: text-top;
+  border-left: solid 1px #777777;
+  border-right: solid 1px #777777;
+  padding: 0.5rem 0.75rem;
+}
+.executionResultsHeaderExplainer {
+  font-weight: 400;
+  color: rgba(0, 0, 0, 0.75);
+}
+th.executionResultsHeaderTime {
+  border-top: solid 1px #777777;
+}
+th.executionResultsHeaderRange {
+  border-bottom: solid 1px #777777;
+  border-top: solid 1px rgba(0, 0, 0, 0.05);
+}
+tbody.executionResults td {
+  padding: 0.5rem 0.75rem;
+  border-right: solid 1px rgba(0, 0, 0, 0.05);
+}
+tbody.executionResults td:last-of-type {
+  border-right: solid 1px #777777;
+}
+td.executionResultsTime {
+  border-top: solid 1px #777777;
+}
+td.executionResultsRange {
+  border-bottom: solid 1px #777777;
+  border-top: solid 1px rgba(0, 0, 0, 0.05);
+}
+.meanTime {
+  display: block;
+}
+.userSystemTime {
+  display: block;
+  margin-top: 0.4rem;
+}
+.executionResultsTimeMean {
+  font-weight: 700;
+}
+.executionResultsTimeStddev {
+  color: rgba(0, 0, 0, 0.75);
+}
+.executionResultsRangeMin,
+.executionResultsRangeMax
+{
+  font-weight: 500;
+}
+.runCount {
+  padding-left: 0.5rem;
+}
+
+.profiling {
+  margin-top: 2rem;
+}
+.profiling h3 {
+  text-align: center;
+  font-weight: 600;
+}
+.flamegraph {
+  width: 1000px;
+}
