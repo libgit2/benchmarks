@@ -2,8 +2,8 @@
 
 import { redirect, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState, useRef } from "react";
-import sparkline from "@fnando/sparkline";
 
+import Sparkline from '../../../components/sparkline';
 import styles from './page.module.css';
 
 function formatTime(time) {
@@ -62,7 +62,7 @@ function RunPlot({ runData, testData, executor }) {
 
   return (
     <td className={styles.executionResultsPlot}>
-      <Sparkline values={result.times} />
+      <Sparkline values={result.times} width={300} height={40} stroke={"rgba(55, 125, 205, 0.45)"} fill={"rgba(55, 125, 205, 0.4)"} />
     </td>
   );
 }
@@ -259,46 +259,6 @@ function RunResults({ params }) {
     </main>
   );
 }
-
-const Sparkline = props => {
-  const sparklineRef = useRef(null);
-  const [currentDatapoint, setCurrentDatapoint] = useState(props.values[0]);
-
-  const options = {
-    onmousemove: (event, datapoint) => {
-      if (datapoint.timestamp !== currentDatapoint.timestamp) {
-        setCurrentDatapoint(datapoint);
-      }
-    },
-    onmouseout: (event) => {
-      setCurrentDatapoint(props.values[0]);
-    }
-  };
-
-  useEffect(() => {
-    const sortedValues = props.values.sort((a,b) => a.timestamp - b.timestamp)
-
-    // initialize sparkline on mount after the element has rendered
-    sparkline(sparklineRef.current, sortedValues, options);
-  }, []);
-
-  const getText = datapoint => {
-    const dateString = new Date(datapoint.timestamp).toLocaleString("en-US", {
-      month: "short",
-      day: "numeric"
-    });
-    return `${dateString}: ${datapoint.value}`;
-  };
-
-  return (
-    <svg
-      ref={sparklineRef}
-      width="300"
-      height="40"
-      strokeWidth="3"
-      fill="rgba(55, 125, 205, 0.4)" />
-  );
-};
 
 export default function RunPage({ params }) {
   return (
