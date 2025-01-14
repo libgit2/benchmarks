@@ -120,8 +120,16 @@ td.executionResultsTime {
   border-top: solid 1px #777777;
 }
 td.executionResultsRange {
-  border-bottom: solid 1px #777777;
   border-top: solid 1px rgba(0, 0, 0, 0.05);
+}
+tbody.executionResults td.executionResultsPlot {
+  border-bottom: solid 1px #777777;
+  padding: 0;
+  vertical-align: bottom;
+}
+tbody.executionResults td.executionResultsPlot svg {
+  padding: 0;
+  display: block;
 }
 .meanTime {
   display: block;
