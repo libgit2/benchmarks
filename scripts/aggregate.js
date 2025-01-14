@@ -80,13 +80,15 @@ for (const platform in platforms) {
 
 /* Update the tests api */
 for (const test in tests) {
-  fs.rmSync(`${testsDir}/${test}`, { recursive: true, force: true });
+  const dirname = test.replaceAll(/::/g, '__');
+
+  fs.rmSync(`${testsDir}/${dirname}`, { recursive: true, force: true });
 
   for (const platform in tests[test]) {
     /* Identify test runs for the last 60 days */
     const filtered = limit(tests[test][platform], daysToKeep);
 
-    fs.mkdirSync(`${testsDir}/${test}`, { recursive: true });
-    fs.writeFileSync(`${testsDir}/${test}/${platform}.json`, JSON.stringify(filtered));
+    fs.mkdirSync(`${testsDir}/${dirname}`, { recursive: true });
+    fs.writeFileSync(`${testsDir}/${dirname}/${platform}.json`, JSON.stringify(filtered));
   }
 }

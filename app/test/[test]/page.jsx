@@ -155,9 +155,10 @@ function RunResults({ params }) {
   useEffect(() => {
     async function fetchData() {
       const test = decodeURIComponent((await params).test);
+      const filename = test.replaceAll(/::/g, '__');
 
       const runResponse = await fetch(`/api/runs/${date}/${platform}.json`);
-      const flamegraphResponse = await fetch(`/api/runs/${date}/${platform}/${test}.svg`);
+      const flamegraphResponse = await fetch(`/api/runs/${date}/${platform}/${filename}.svg`);
 
       if (! runResponse.ok) {
         throw new Error(`failed to fetch data: ${runResponse.status}`);
