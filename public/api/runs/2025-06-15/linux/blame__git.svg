@@ -1,0 +1,2648 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="582" onload="init(evt)" viewBox="0 0 1200 582" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="582.0" fill="url(#background)"  />
+<text id="details" x="10.00" y="565" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="565" > </text>
+<g id="frames">
+<g >
+<title>git_config_list_append (6,006,006 samples, 0.04%)</title><rect x="145.7" y="501" width="0.5" height="15.0" fill="rgba(55,125,205,0.26)" rx="2" ry="2" />
+<text  x="148.68" y="511.5" ></text>
+</g>
+<g >
+<title>malloc (14,014,014 samples, 0.10%)</title><rect x="71.4" y="469" width="1.1" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="74.37" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="389" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="399.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (3,003,003 samples, 0.02%)</title><rect x="259.9" y="261" width="0.3" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.91" y="271.5" ></text>
+</g>
+<g >
+<title>git_oid_cpy (3,003,003 samples, 0.02%)</title><rect x="167.1" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.23)" rx="2" ry="2" />
+<text  x="170.06" y="511.5" ></text>
+</g>
+<g >
+<title>inflateInit2_ (54,054,054 samples, 0.38%)</title><rect x="236.3" y="485" width="4.5" height="15.0" fill="rgba(241,80,47,0.81)" rx="2" ry="2" />
+<text  x="239.28" y="495.5" ></text>
+</g>
+<g >
+<title>cfree (3,003,003 samples, 0.02%)</title><rect x="68.5" y="453" width="0.3" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="71.53" y="463.5" ></text>
+</g>
+<g >
+<title>git_vector_insert (13,013,013 samples, 0.09%)</title><rect x="192.1" y="501" width="1.1" height="15.0" fill="rgba(55,125,205,0.38)" rx="2" ry="2" />
+<text  x="195.11" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="389" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown]  (2,002,002 samples, 0.01%)</title><rect x="10.2" y="325" width="0.1" height="15.0" fill="rgba(241,80,47,0.98)" rx="2" ry="2" />
+<text  x="13.17" y="335.5" ></text>
+</g>
+<g >
+<title>cfree (20,020,020 samples, 0.14%)</title><rect x="147.1" y="485" width="1.7" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="150.10" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="309" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="319.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (41,041,041 samples, 0.29%)</title><rect x="50.5" y="469" width="3.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="53.50" y="479.5" ></text>
+</g>
+<g >
+<title>[System.Private.CoreLib.dll] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="357" width="0.3" height="15.0" fill="rgba(55,125,205,0.32)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" ></text>
+</g>
+<g >
+<title>kworker/0:0-eve (3,003,003 samples, 0.02%)</title><rect x="581.0" y="517" width="0.2" height="15.0" fill="rgba(55,125,205,0.34)" rx="2" ry="2" />
+<text  x="583.96" y="527.5" ></text>
+</g>
+<g >
+<title>[ld-linux-x86-64.so.2] (2,002,002 samples, 0.01%)</title><rect x="13.8" y="437" width="0.1" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="16.76" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.0" y="341" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.05" y="351.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (18,018,018 samples, 0.13%)</title><rect x="149.9" y="469" width="1.5" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="152.94" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.3" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.33" y="479.5" ></text>
+</g>
+<g >
+<title>malloc (7,007,007 samples, 0.05%)</title><rect x="173.7" y="485" width="0.6" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="176.74" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="325" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="335.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="87.6" y="453" width="0.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="90.57" y="463.5" ></text>
+</g>
+<g >
+<title>sha1_compression_states (2,283,283,281 samples, 16.14%)</title><rect x="262.7" y="501" width="190.5" height="15.0" fill="rgba(241,80,47,0.92)" rx="2" ry="2" />
+<text  x="265.75" y="511.5" >sha1_compression_states</text>
+</g>
+<g >
+<title>__sched_yield (2,002,002 samples, 0.01%)</title><rect x="10.0" y="309" width="0.2" height="15.0" fill="rgba(55,125,205,0.34)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (99,099,099 samples, 0.70%)</title><rect x="89.5" y="469" width="8.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.49" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="357" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="367.5" ></text>
+</g>
+<g >
+<title>git_oid_is_zero (2,002,002 samples, 0.01%)</title><rect x="171.7" y="501" width="0.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="174.65" y="511.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (19,019,019 samples, 0.13%)</title><rect x="259.2" y="325" width="1.6" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="309" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="319.5" ></text>
+</g>
+<g >
+<title>packfile_unpack_compressed (8,008,008 samples, 0.06%)</title><rect x="261.5" y="501" width="0.7" height="15.0" fill="rgba(55,125,205,0.34)" rx="2" ry="2" />
+<text  x="264.50" y="511.5" ></text>
+</g>
+<g >
+<title>cache_get (16,016,016 samples, 0.11%)</title><rect x="85.1" y="501" width="1.3" height="15.0" fill="rgba(241,80,47,0.96)" rx="2" ry="2" />
+<text  x="88.07" y="511.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (3,003,003 samples, 0.02%)</title><rect x="259.6" y="213" width="0.2" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.58" y="223.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="182.2" y="469" width="0.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="185.17" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="85" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="95.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (19,019,019 samples, 0.13%)</title><rect x="259.2" y="341" width="1.6" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="351.5" ></text>
+</g>
+<g >
+<title>git_zstream_init (56,056,056 samples, 0.40%)</title><rect x="236.3" y="501" width="4.7" height="15.0" fill="rgba(55,125,205,0.55)" rx="2" ry="2" />
+<text  x="239.28" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="341" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="229" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="239.5" ></text>
+</g>
+<g >
+<title>git__strdup (3,003,003 samples, 0.02%)</title><rect x="73.2" y="485" width="0.3" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="76.21" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="479.5" ></text>
+</g>
+<g >
+<title>xdl_change_compact (2,002,002 samples, 0.01%)</title><rect x="578.8" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.94)" rx="2" ry="2" />
+<text  x="581.79" y="511.5" ></text>
+</g>
+<g >
+<title>realloc (2,002,002 samples, 0.01%)</title><rect x="182.2" y="485" width="0.1" height="15.0" fill="rgba(241,80,47,0.86)" rx="2" ry="2" />
+<text  x="185.17" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="373" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="383.5" ></text>
+</g>
+<g >
+<title>malloc (3,003,003 samples, 0.02%)</title><rect x="181.9" y="485" width="0.3" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="184.92" y="495.5" ></text>
+</g>
+<g >
+<title>[ld-linux-x86-64.so.2] (2,002,002 samples, 0.01%)</title><rect x="13.8" y="469" width="0.1" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="16.76" y="479.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_min (2,002,002 samples, 0.01%)</title><rect x="162.7" y="389" width="0.2" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="165.72" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="405" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="415.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_min (3,003,003 samples, 0.02%)</title><rect x="163.0" y="405" width="0.2" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="165.97" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="55.3" y="437" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.26" y="447.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="182.0" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="185.01" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (6,006,006 samples, 0.04%)</title><rect x="42.5" y="277" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.48" y="287.5" ></text>
+</g>
+<g >
+<title>fstatat64 (107,107,107 samples, 0.76%)</title><rect x="88.8" y="501" width="9.0" height="15.0" fill="rgba(55,125,205,0.53)" rx="2" ry="2" />
+<text  x="91.82" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="469" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.7" y="373" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.71" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="453" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="463.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (19,019,019 samples, 0.13%)</title><rect x="259.2" y="373" width="1.6" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown]  (4,004,004 samples, 0.03%)</title><rect x="10.0" y="341" width="0.3" height="15.0" fill="rgba(241,80,47,0.98)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (19,019,019 samples, 0.13%)</title><rect x="259.2" y="389" width="1.6" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="399.5" ></text>
+</g>
+<g >
+<title>cfree (2,002,002 samples, 0.01%)</title><rect x="66.2" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="69.19" y="463.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (21,021,021 samples, 0.15%)</title><rect x="238.8" y="437" width="1.7" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="241.79" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="485" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="495.5" ></text>
+</g>
+<g >
+<title>hashsig_add_hashes (88,088,088 samples, 0.62%)</title><rect x="241.0" y="501" width="7.3" height="15.0" fill="rgba(55,125,205,0.27)" rx="2" ry="2" />
+<text  x="243.96" y="511.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_min (4,004,004 samples, 0.03%)</title><rect x="163.4" y="421" width="0.3" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="166.39" y="431.5" ></text>
+</g>
+<g >
+<title>X509_load_cert_crl_file_ex (21,021,021 samples, 0.15%)</title><rect x="259.2" y="453" width="1.8" height="15.0" fill="rgba(241,80,47,0.96)" rx="2" ry="2" />
+<text  x="262.24" y="463.5" ></text>
+</g>
+<g >
+<title>cache_store (9,009,009 samples, 0.06%)</title><rect x="86.4" y="501" width="0.8" height="15.0" fill="rgba(55,125,205,0.47)" rx="2" ry="2" />
+<text  x="89.40" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="84.6" y="229" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.56" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="389" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="341" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="351.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="67.9" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="70.95" y="447.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (19,019,019 samples, 0.13%)</title><rect x="259.2" y="357" width="1.6" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="325" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="335.5" ></text>
+</g>
+<g >
+<title>strerror_l (2,002,002 samples, 0.01%)</title><rect x="153.7" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.84)" rx="2" ry="2" />
+<text  x="156.70" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (17,017,017 samples, 0.12%)</title><rect x="1188.5" y="309" width="1.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1191.50" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (94,094,094 samples, 0.67%)</title><rect x="89.9" y="389" width="7.9" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.91" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="110.9" y="421" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="113.95" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="42.4" y="293" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.40" y="303.5" ></text>
+</g>
+<g >
+<title>cfree (8,008,008 samples, 0.06%)</title><rect x="142.4" y="485" width="0.7" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="145.43" y="495.5" ></text>
+</g>
+<g >
+<title>git__reallocarray (97,097,097 samples, 0.69%)</title><rect x="103.2" y="501" width="8.1" height="15.0" fill="rgba(55,125,205,0.41)" rx="2" ry="2" />
+<text  x="106.18" y="511.5" ></text>
+</g>
+<g >
+<title>__munmap (7,007,007 samples, 0.05%)</title><rect x="84.3" y="501" width="0.6" height="15.0" fill="rgba(55,125,205,0.30)" rx="2" ry="2" />
+<text  x="87.31" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="405" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="415.5" ></text>
+</g>
+<g >
+<title>OPENSSL_LH_retrieve (3,003,003 samples, 0.02%)</title><rect x="259.6" y="229" width="0.2" height="15.0" fill="rgba(55,125,205,0.44)" rx="2" ry="2" />
+<text  x="262.58" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="11.2" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="453" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="149" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="165" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="175.5" ></text>
+</g>
+<g >
+<title>git_config_snapshot (4,004,004 samples, 0.03%)</title><rect x="66.8" y="469" width="0.3" height="15.0" fill="rgba(241,80,47,0.74)" rx="2" ry="2" />
+<text  x="69.78" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="181" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="191.5" ></text>
+</g>
+<g >
+<title>realloc (90,090,090 samples, 0.64%)</title><rect x="103.8" y="485" width="7.5" height="15.0" fill="rgba(241,80,47,0.86)" rx="2" ry="2" />
+<text  x="106.77" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="453" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (27,027,027 samples, 0.19%)</title><rect x="40.7" y="469" width="2.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="43.73" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="405" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="245" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="255.5" ></text>
+</g>
+<g >
+<title>odb_read_1 (2,002,002 samples, 0.01%)</title><rect x="258.9" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.31)" rx="2" ry="2" />
+<text  x="261.91" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (495,495,495 samples, 3.50%)</title><rect x="43.0" y="501" width="41.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.98" y="511.5" >[un..</text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="389" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="399.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (8,008,008 samples, 0.06%)</title><rect x="177.0" y="469" width="0.7" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="180.00" y="479.5" ></text>
+</g>
+<g >
+<title>git_config_list_free (25,025,025 samples, 0.18%)</title><rect x="146.7" y="501" width="2.1" height="15.0" fill="rgba(241,80,47,0.78)" rx="2" ry="2" />
+<text  x="149.69" y="511.5" ></text>
+</g>
+<g >
+<title>git_packfile_unpack (33,033,033 samples, 0.23%)</title><rect x="171.8" y="501" width="2.8" height="15.0" fill="rgba(55,125,205,0.56)" rx="2" ry="2" />
+<text  x="174.82" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="54.2" y="245" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.17" y="255.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="54.2" y="181" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.17" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="174.1" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.07" y="447.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (2,002,002 samples, 0.01%)</title><rect x="260.4" y="133" width="0.2" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.41" y="143.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (14,014,014 samples, 0.10%)</title><rect x="112.1" y="469" width="1.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="115.12" y="479.5" ></text>
+</g>
+<g >
+<title>pack_entry_find_offset (4,004,004 samples, 0.03%)</title><rect x="261.1" y="501" width="0.3" height="15.0" fill="rgba(241,80,47,0.73)" rx="2" ry="2" />
+<text  x="264.08" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="485" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (348,348,348 samples, 2.46%)</title><rect x="13.9" y="501" width="29.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="16.92" y="511.5" >[l..</text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="142.9" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="145.93" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (10,010,010 samples, 0.07%)</title><rect x="42.1" y="373" width="0.9" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.15" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="469" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="479.5" >[unknown]</text>
+</g>
+<g >
+<title>[libc.so.6] (4,004,004 samples, 0.03%)</title><rect x="71.0" y="437" width="0.3" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="73.95" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="325" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="335.5" ></text>
+</g>
+<g >
+<title>git_diff_tree_to_tree (3,003,003 samples, 0.02%)</title><rect x="153.2" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="156.20" y="511.5" ></text>
+</g>
+<g >
+<title>git_vector_dispose (5,005,005 samples, 0.04%)</title><rect x="191.7" y="501" width="0.4" height="15.0" fill="rgba(241,80,47,0.65)" rx="2" ry="2" />
+<text  x="194.69" y="511.5" ></text>
+</g>
+<g >
+<title>malloc (39,039,039 samples, 0.28%)</title><rect x="98.6" y="485" width="3.2" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="101.59" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (6,006,006 samples, 0.04%)</title><rect x="1189.4" y="245" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1192.42" y="255.5" ></text>
+</g>
+<g >
+<title>git_pool_strndup (2,002,002 samples, 0.01%)</title><rect x="81.6" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="84.64" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="511.5" ></text>
+</g>
+<g >
+<title>git_config_list_free (2,002,002 samples, 0.01%)</title><rect x="54.4" y="453" width="0.2" height="15.0" fill="rgba(241,80,47,0.78)" rx="2" ry="2" />
+<text  x="57.42" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (14,014,014 samples, 0.10%)</title><rect x="41.8" y="389" width="1.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="44.81" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (9,009,009 samples, 0.06%)</title><rect x="42.2" y="357" width="0.8" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.23" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.3" y="389" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.25" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="421" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="431.5" ></text>
+</g>
+<g >
+<title>config_file_is_modified (2,002,002 samples, 0.01%)</title><rect x="87.7" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.33)" rx="2" ry="2" />
+<text  x="90.74" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="421" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="341" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="351.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (2,002,002 samples, 0.01%)</title><rect x="10.0" y="325" width="0.2" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="405" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="415.5" ></text>
+</g>
+<g >
+<title>OSSL_DECODER_is_a (3,003,003 samples, 0.02%)</title><rect x="260.3" y="197" width="0.3" height="15.0" fill="rgba(55,125,205,0.25)" rx="2" ry="2" />
+<text  x="263.33" y="207.5" ></text>
+</g>
+<g >
+<title>config_snapshot_open (3,003,003 samples, 0.02%)</title><rect x="88.4" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.57)" rx="2" ry="2" />
+<text  x="91.41" y="511.5" ></text>
+</g>
+<g >
+<title>SHA1DCInit (2,002,002 samples, 0.01%)</title><rect x="11.6" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="14.59" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,344,344,341 samples, 23.64%)</title><rect x="910.9" y="389" width="279.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="913.95" y="399.5" >[unknown]</text>
+</g>
+<g >
+<title>SSL_CTX_new_ex (2,002,002 samples, 0.01%)</title><rect x="259.1" y="485" width="0.1" height="15.0" fill="rgba(55,125,205,0.21)" rx="2" ry="2" />
+<text  x="262.08" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="81.1" y="469" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.14" y="479.5" ></text>
+</g>
+<g >
+<title>git_config_list_headmap__resize (3,003,003 samples, 0.02%)</title><rect x="148.9" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.32)" rx="2" ry="2" />
+<text  x="151.86" y="511.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (2,002,002 samples, 0.01%)</title><rect x="68.9" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.62)" rx="2" ry="2" />
+<text  x="71.95" y="479.5" ></text>
+</g>
+<g >
+<title>git_mwindow_close (2,002,002 samples, 0.01%)</title><rect x="164.5" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.92)" rx="2" ry="2" />
+<text  x="167.47" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown]  (2,002,002 samples, 0.01%)</title><rect x="10.2" y="293" width="0.1" height="15.0" fill="rgba(241,80,47,0.98)" rx="2" ry="2" />
+<text  x="13.17" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="463.5" ></text>
+</g>
+<g >
+<title>git_delta_apply (24,024,024 samples, 0.17%)</title><rect x="149.4" y="501" width="2.0" height="15.0" fill="rgba(55,125,205,0.41)" rx="2" ry="2" />
+<text  x="152.44" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="389" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="399.5" ></text>
+</g>
+<g >
+<title>PEM_X509_INFO_read_bio_ex (21,021,021 samples, 0.15%)</title><rect x="259.2" y="437" width="1.8" height="15.0" fill="rgba(241,80,47,0.77)" rx="2" ry="2" />
+<text  x="262.24" y="447.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (5,005,005 samples, 0.04%)</title><rect x="148.4" y="469" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="151.36" y="479.5" ></text>
+</g>
+<g >
+<title>git_hashsig_compare (78,078,078 samples, 0.55%)</title><rect x="154.0" y="501" width="6.5" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="157.03" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="277" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="287.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="68.4" y="437" width="0.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="71.37" y="447.5" ></text>
+</g>
+<g >
+<title>config_file_refresh (2,002,002 samples, 0.01%)</title><rect x="88.0" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.56)" rx="2" ry="2" />
+<text  x="90.99" y="511.5" ></text>
+</g>
+<g >
+<title>iterator_advance (9,009,009 samples, 0.06%)</title><rect x="257.4" y="501" width="0.8" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="260.41" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="293" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="303.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (9,009,009 samples, 0.06%)</title><rect x="259.9" y="293" width="0.8" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.91" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (61,061,061 samples, 0.43%)</title><rect x="92.7" y="341" width="5.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="95.66" y="351.5" ></text>
+</g>
+<g >
+<title>cfree (2,002,002 samples, 0.01%)</title><rect x="182.8" y="485" width="0.1" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="185.76" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="110.9" y="437" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="113.95" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="447.5" ></text>
+</g>
+<g >
+<title>OPENSSL_LH_retrieve (2,002,002 samples, 0.01%)</title><rect x="260.4" y="149" width="0.2" height="15.0" fill="rgba(55,125,205,0.44)" rx="2" ry="2" />
+<text  x="263.41" y="159.5" ></text>
+</g>
+<g >
+<title>git_config_free (4,004,004 samples, 0.03%)</title><rect x="66.0" y="469" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="69.03" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (49,049,049 samples, 0.35%)</title><rect x="93.7" y="325" width="4.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="96.67" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="55.3" y="373" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.34" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="84.5" y="261" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.48" y="271.5" ></text>
+</g>
+<g >
+<title>ASN1_item_d2i_ex (19,019,019 samples, 0.13%)</title><rect x="259.2" y="421" width="1.6" height="15.0" fill="rgba(241,80,47,0.71)" rx="2" ry="2" />
+<text  x="262.24" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.3" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.33" y="463.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (53,053,053 samples, 0.38%)</title><rect x="236.4" y="453" width="4.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="239.36" y="463.5" ></text>
+</g>
+<g >
+<title>git__strdup (24,024,024 samples, 0.17%)</title><rect x="111.3" y="501" width="2.0" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="114.28" y="511.5" ></text>
+</g>
+<g >
+<title>openssl_init (23,023,023 samples, 0.16%)</title><rect x="259.1" y="501" width="1.9" height="15.0" fill="rgba(241,80,47,0.86)" rx="2" ry="2" />
+<text  x="262.08" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="405" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="415.5" ></text>
+</g>
+<g >
+<title>git_oid_equal (5,005,005 samples, 0.04%)</title><rect x="79.4" y="485" width="0.4" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="82.39" y="495.5" ></text>
+</g>
+<g >
+<title>malloc (53,053,053 samples, 0.38%)</title><rect x="236.4" y="469" width="4.4" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="239.36" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (95,095,095 samples, 0.67%)</title><rect x="89.8" y="453" width="8.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.82" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.3" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.33" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (36,036,036 samples, 0.25%)</title><rect x="160.8" y="453" width="3.0" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="163.80" y="463.5" ></text>
+</g>
+<g >
+<title>:1122 (2,002,002 samples, 0.01%)</title><rect x="10.3" y="517" width="0.2" height="15.0" fill="rgba(55,125,205,0.28)" rx="2" ry="2" />
+<text  x="13.33" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="325" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="335.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (23,023,023 samples, 0.16%)</title><rect x="161.3" y="421" width="1.9" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="164.30" y="431.5" ></text>
+</g>
+<g >
+<title>git_pool_clear (2,002,002 samples, 0.01%)</title><rect x="174.9" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="177.91" y="511.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_max (2,002,002 samples, 0.01%)</title><rect x="163.2" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.33)" rx="2" ry="2" />
+<text  x="166.22" y="431.5" ></text>
+</g>
+<g >
+<title>xdl_cha_alloc (5,005,005 samples, 0.04%)</title><rect x="83.4" y="485" width="0.4" height="15.0" fill="rgba(241,80,47,0.93)" rx="2" ry="2" />
+<text  x="86.40" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="341" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="293" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="303.5" ></text>
+</g>
+<g >
+<title>malloc (19,019,019 samples, 0.13%)</title><rect x="69.7" y="469" width="1.6" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="72.70" y="479.5" ></text>
+</g>
+<g >
+<title>git_str_puts (14,014,014 samples, 0.10%)</title><rect x="180.7" y="501" width="1.1" height="15.0" fill="rgba(241,80,47,0.81)" rx="2" ry="2" />
+<text  x="183.67" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="55.3" y="421" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.26" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="197" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="207.5" ></text>
+</g>
+<g >
+<title>config_iterator_free (2,002,002 samples, 0.01%)</title><rect x="88.2" y="501" width="0.1" height="15.0" fill="rgba(55,125,205,0.44)" rx="2" ry="2" />
+<text  x="91.15" y="511.5" ></text>
+</g>
+<g >
+<title>khugepaged (5,005,005 samples, 0.04%)</title><rect x="580.5" y="517" width="0.5" height="15.0" fill="rgba(55,125,205,0.33)" rx="2" ry="2" />
+<text  x="583.54" y="527.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="162.3" y="373" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="165.30" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="277" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="287.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (9,009,009 samples, 0.06%)</title><rect x="173.0" y="469" width="0.7" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="175.99" y="479.5" ></text>
+</g>
+<g >
+<title>pack_entry_find_offset (9,009,009 samples, 0.06%)</title><rect x="82.4" y="485" width="0.7" height="15.0" fill="rgba(241,80,47,0.73)" rx="2" ry="2" />
+<text  x="85.39" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (95,095,095 samples, 0.67%)</title><rect x="89.8" y="405" width="8.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.82" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="463.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (8,008,008 samples, 0.06%)</title><rect x="110.2" y="437" width="0.7" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="113.20" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="261" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="271.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="405" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="415.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (12,012,012 samples, 0.08%)</title><rect x="71.5" y="453" width="1.0" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="74.54" y="463.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (13,013,013 samples, 0.09%)</title><rect x="165.5" y="453" width="1.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="168.47" y="463.5" ></text>
+</g>
+<g >
+<title>git__strntol32 (82,082,082 samples, 0.58%)</title><rect x="113.3" y="501" width="6.8" height="15.0" fill="rgba(241,80,47,0.72)" rx="2" ry="2" />
+<text  x="116.29" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="453" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="469" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="479.5" ></text>
+</g>
+<g >
+<title>.NET_TP_Worker (4,004,004 samples, 0.03%)</title><rect x="10.0" y="517" width="0.3" height="15.0" fill="rgba(241,80,47,0.79)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="191.9" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="194.94" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.0" y="277" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" ></text>
+</g>
+<g >
+<title>:1852 (2,002,002 samples, 0.01%)</title><rect x="11.0" y="517" width="0.2" height="15.0" fill="rgba(241,80,47,0.84)" rx="2" ry="2" />
+<text  x="14.00" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="213" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="223.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="437" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="485" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="495.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="405" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="415.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (5,005,005 samples, 0.04%)</title><rect x="259.4" y="261" width="0.4" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.41" y="271.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="1189.3" y="277" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1192.33" y="287.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="453" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="501" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (8,008,008 samples, 0.06%)</title><rect x="42.3" y="309" width="0.7" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.31" y="319.5" ></text>
+</g>
+<g >
+<title>tree_iterator_advance (97,097,097 samples, 0.69%)</title><rect x="478.1" y="501" width="8.1" height="15.0" fill="rgba(241,80,47,0.69)" rx="2" ry="2" />
+<text  x="481.09" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.0" y="293" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="11.2" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="495.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (3,003,003 samples, 0.02%)</title><rect x="260.3" y="181" width="0.3" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.33" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (17,017,017 samples, 0.12%)</title><rect x="1188.5" y="293" width="1.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1191.50" y="303.5" ></text>
+</g>
+<g >
+<title>git_diff__from_iterators (14,014,014 samples, 0.10%)</title><rect x="151.5" y="501" width="1.2" height="15.0" fill="rgba(55,125,205,0.41)" rx="2" ry="2" />
+<text  x="154.53" y="511.5" ></text>
+</g>
+<g >
+<title>git_object_lookup (2,002,002 samples, 0.01%)</title><rect x="164.8" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.36)" rx="2" ry="2" />
+<text  x="167.81" y="511.5" ></text>
+</g>
+<g >
+<title>git_oid_from_prefix (4,004,004 samples, 0.03%)</title><rect x="79.8" y="485" width="0.3" height="15.0" fill="rgba(241,80,47,0.87)" rx="2" ry="2" />
+<text  x="82.80" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (225,225,225 samples, 1.59%)</title><rect x="50.5" y="485" width="18.8" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="53.50" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (27,027,027 samples, 0.19%)</title><rect x="40.7" y="485" width="2.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="43.73" y="495.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (47,047,047 samples, 0.33%)</title><rect x="107.0" y="453" width="3.9" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="110.03" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="55.3" y="357" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.34" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="11.2" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="463.5" ></text>
+</g>
+<g >
+<title>:1845 (5,005,005 samples, 0.04%)</title><rect x="10.6" y="517" width="0.4" height="15.0" fill="rgba(241,80,47,0.64)" rx="2" ry="2" />
+<text  x="13.58" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="469" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (14,014,014 samples, 0.10%)</title><rect x="41.8" y="405" width="1.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="44.81" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="501" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="511.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="10.7" y="53" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.67" y="63.5" ></text>
+</g>
+<g >
+<title>[ld-linux-x86-64.so.2] (2,002,002 samples, 0.01%)</title><rect x="13.8" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="16.76" y="511.5" ></text>
+</g>
+<g >
+<title>git_object_lookup_prefix (4,004,004 samples, 0.03%)</title><rect x="165.0" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="167.97" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="357" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.3" y="405" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.25" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (27,027,027 samples, 0.19%)</title><rect x="40.7" y="453" width="2.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="43.73" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="133" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="143.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (3,003,003 samples, 0.02%)</title><rect x="173.4" y="453" width="0.3" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="176.41" y="463.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (5,005,005 samples, 0.04%)</title><rect x="260.2" y="229" width="0.5" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.24" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="437" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="447.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_min (2,002,002 samples, 0.01%)</title><rect x="163.8" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="166.80" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="357" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="405" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="415.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="495.5" ></text>
+</g>
+<g >
+<title>git_config_list_dup_entry (3,003,003 samples, 0.02%)</title><rect x="146.4" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.47)" rx="2" ry="2" />
+<text  x="149.44" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="389" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="117" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,342,342,339 samples, 23.63%)</title><rect x="911.1" y="373" width="278.8" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="914.12" y="383.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="373" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="437" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="447.5" ></text>
+</g>
+<g >
+<title>X509_STORE_set_default_paths_ex (21,021,021 samples, 0.15%)</title><rect x="259.2" y="485" width="1.8" height="15.0" fill="rgba(55,125,205,0.41)" rx="2" ry="2" />
+<text  x="262.24" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="11.2" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="511.5" ></text>
+</g>
+<g >
+<title>git_object__from_odb_object (2,002,002 samples, 0.01%)</title><rect x="164.6" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.71)" rx="2" ry="2" />
+<text  x="167.64" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="485" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="495.5" ></text>
+</g>
+<g >
+<title>git_blame__like_git (111,111,111 samples, 0.79%)</title><rect x="55.9" y="469" width="9.3" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="58.92" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="453" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="463.5" >[unknown]</text>
+</g>
+<g >
+<title>all (14,146,146,132 samples, 100%)</title><rect x="10.0" y="533" width="1180.0" height="15.0" fill="rgba(55,125,205,0.34)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" ></text>
+</g>
+<g >
+<title>[unknown] (99,099,099 samples, 0.70%)</title><rect x="89.5" y="485" width="8.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.49" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,342,342,339 samples, 23.63%)</title><rect x="911.1" y="357" width="278.8" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="914.12" y="367.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="357" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="580.8" y="341" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.80" y="351.5" ></text>
+</g>
+<g >
+<title>chronyd (3,003,003 samples, 0.02%)</title><rect x="11.2" y="517" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="389" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="373" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="383.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (2,002,002 samples, 0.01%)</title><rect x="174.3" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.88)" rx="2" ry="2" />
+<text  x="177.32" y="495.5" ></text>
+</g>
+<g >
+<title>git__calloc (20,020,020 samples, 0.14%)</title><rect x="69.6" y="485" width="1.7" height="15.0" fill="rgba(55,125,205,0.52)" rx="2" ry="2" />
+<text  x="72.62" y="495.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (3,003,003 samples, 0.02%)</title><rect x="259.9" y="245" width="0.3" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.91" y="255.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="174.1" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.07" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="389" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (8,008,008 samples, 0.06%)</title><rect x="53.9" y="469" width="0.7" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="56.92" y="479.5" ></text>
+</g>
+<g >
+<title>cfree (5,005,005 samples, 0.04%)</title><rect x="166.6" y="485" width="0.4" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="169.56" y="495.5" ></text>
+</g>
+<g >
+<title>git_tree__free (4,004,004 samples, 0.03%)</title><rect x="182.6" y="501" width="0.3" height="15.0" fill="rgba(241,80,47,0.74)" rx="2" ry="2" />
+<text  x="185.59" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="580.8" y="325" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.80" y="335.5" ></text>
+</g>
+<g >
+<title>swapper (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="517" width="608.0" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="584.88" y="527.5" >swapper</text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.8" y="37" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.83" y="47.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="81.6" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="84.64" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="405" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="415.5" ></text>
+</g>
+<g >
+<title>[ld-linux-x86-64.so.2] (2,002,002 samples, 0.01%)</title><rect x="13.8" y="485" width="0.1" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="16.76" y="495.5" ></text>
+</g>
+<g >
+<title>OSSL_DECODER_is_a (6,006,006 samples, 0.04%)</title><rect x="259.3" y="277" width="0.5" height="15.0" fill="rgba(55,125,205,0.25)" rx="2" ry="2" />
+<text  x="262.33" y="287.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (5,005,005 samples, 0.04%)</title><rect x="72.8" y="437" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="75.79" y="447.5" ></text>
+</g>
+<g >
+<title>git_zstream_eos (2,002,002 samples, 0.01%)</title><rect x="193.2" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="196.20" y="511.5" ></text>
+</g>
+<g >
+<title>strlen@plt (3,003,003 samples, 0.02%)</title><rect x="477.8" y="501" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="480.84" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="81.1" y="453" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.14" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="373" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="383.5" ></text>
+</g>
+<g >
+<title>git_config_list_append (7,007,007 samples, 0.05%)</title><rect x="77.7" y="485" width="0.6" height="15.0" fill="rgba(55,125,205,0.26)" rx="2" ry="2" />
+<text  x="80.72" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="10.3" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.33" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="437" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="447.5" ></text>
+</g>
+<g >
+<title>git_signature_free (3,003,003 samples, 0.02%)</title><rect x="177.7" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.52)" rx="2" ry="2" />
+<text  x="180.66" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="341" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="351.5" ></text>
+</g>
+<g >
+<title>tree_iterator_frame_init (44,044,044 samples, 0.31%)</title><rect x="486.2" y="501" width="3.7" height="15.0" fill="rgba(241,80,47,0.77)" rx="2" ry="2" />
+<text  x="489.19" y="511.5" ></text>
+</g>
+<g >
+<title>hashsig_heap_insert (42,042,042 samples, 0.30%)</title><rect x="253.9" y="501" width="3.5" height="15.0" fill="rgba(241,80,47,0.79)" rx="2" ry="2" />
+<text  x="256.90" y="511.5" ></text>
+</g>
+<g >
+<title>cfree (2,002,002 samples, 0.01%)</title><rect x="87.2" y="501" width="0.1" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="90.15" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="421" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="431.5" ></text>
+</g>
+<g >
+<title>malloc (3,003,003 samples, 0.02%)</title><rect x="73.2" y="469" width="0.3" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="76.21" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="357" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="133" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="143.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="325" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="437" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="447.5" ></text>
+</g>
+<g >
+<title>xdl_prepare_ctx (5,005,005 samples, 0.04%)</title><rect x="83.8" y="485" width="0.4" height="15.0" fill="rgba(241,80,47,0.95)" rx="2" ry="2" />
+<text  x="86.81" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="373" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="117" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="405" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="469" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="174.1" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.07" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.0" y="357" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.05" y="367.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (3,003,003 samples, 0.02%)</title><rect x="87.5" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="90.49" y="479.5" ></text>
+</g>
+<g >
+<title>malloc (24,024,024 samples, 0.17%)</title><rect x="111.3" y="485" width="2.0" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="114.28" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="357" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="367.5" ></text>
+</g>
+<g >
+<title>git_vector_dispose_deep (3,003,003 samples, 0.02%)</title><rect x="68.5" y="469" width="0.3" height="15.0" fill="rgba(241,80,47,0.84)" rx="2" ry="2" />
+<text  x="71.53" y="479.5" ></text>
+</g>
+<g >
+<title>git_grafts_get (2,002,002 samples, 0.01%)</title><rect x="153.9" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.86)" rx="2" ry="2" />
+<text  x="156.87" y="511.5" ></text>
+</g>
+<g >
+<title>qsort_r (43,043,043 samples, 0.30%)</title><rect x="160.5" y="485" width="3.6" height="15.0" fill="rgba(241,80,47,0.72)" rx="2" ry="2" />
+<text  x="163.55" y="495.5" ></text>
+</g>
+<g >
+<title>SHA1DCUpdate (24,024,024 samples, 0.17%)</title><rect x="11.8" y="501" width="2.0" height="15.0" fill="rgba(55,125,205,0.23)" rx="2" ry="2" />
+<text  x="14.75" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="81.4" y="293" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.39" y="303.5" ></text>
+</g>
+<g >
+<title>vsnprintf (2,002,002 samples, 0.01%)</title><rect x="182.4" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.77)" rx="2" ry="2" />
+<text  x="185.42" y="495.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (3,003,003 samples, 0.02%)</title><rect x="259.9" y="229" width="0.3" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.91" y="239.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (5,005,005 samples, 0.04%)</title><rect x="260.2" y="245" width="0.5" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.24" y="255.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="373" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="421" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="431.5" >[unknown]</text>
+</g>
+<g >
+<title>[libcrypto.so.3] (19,019,019 samples, 0.13%)</title><rect x="259.2" y="405" width="1.6" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="11.2" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="431.5" ></text>
+</g>
+<g >
+<title>malloc (6,006,006 samples, 0.04%)</title><rect x="103.3" y="485" width="0.5" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="106.27" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="389" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="399.5" ></text>
+</g>
+<g >
+<title>diff_generated_free (4,004,004 samples, 0.03%)</title><rect x="54.9" y="469" width="0.4" height="15.0" fill="rgba(241,80,47,0.95)" rx="2" ry="2" />
+<text  x="57.92" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="81.4" y="277" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.39" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="101" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="111.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="389" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="399.5" ></text>
+</g>
+<g >
+<title>git_config_add_backend (2,002,002 samples, 0.01%)</title><rect x="143.3" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.79)" rx="2" ry="2" />
+<text  x="146.26" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (13,013,013 samples, 0.09%)</title><rect x="70.2" y="453" width="1.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="73.20" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="373" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="383.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (41,041,041 samples, 0.29%)</title><rect x="160.5" y="469" width="3.5" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="163.55" y="479.5" ></text>
+</g>
+<g >
+<title>git_cached_obj_decref (4,004,004 samples, 0.03%)</title><rect x="142.1" y="501" width="0.3" height="15.0" fill="rgba(241,80,47,0.65)" rx="2" ry="2" />
+<text  x="145.09" y="511.5" ></text>
+</g>
+<g >
+<title>git_zstream_get_output_chunk (514,514,514 samples, 3.64%)</title><rect x="193.4" y="501" width="42.9" height="15.0" fill="rgba(55,125,205,0.58)" rx="2" ry="2" />
+<text  x="196.36" y="511.5" >git_..</text>
+</g>
+<g >
+<title>[unknown] (14,014,014 samples, 0.10%)</title><rect x="41.8" y="421" width="1.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="44.81" y="431.5" ></text>
+</g>
+<g >
+<title>malloc (4,004,004 samples, 0.03%)</title><rect x="258.2" y="501" width="0.4" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="261.24" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (4,004,004 samples, 0.03%)</title><rect x="166.6" y="469" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="169.64" y="479.5" ></text>
+</g>
+<g >
+<title>git_config_snapshot (2,002,002 samples, 0.01%)</title><rect x="149.3" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.74)" rx="2" ry="2" />
+<text  x="152.28" y="511.5" ></text>
+</g>
+<g >
+<title>git_diff_find_similar (6,006,006 samples, 0.04%)</title><rect x="152.7" y="501" width="0.5" height="15.0" fill="rgba(55,125,205,0.59)" rx="2" ry="2" />
+<text  x="155.70" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="1189.7" y="213" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1192.75" y="223.5" ></text>
+</g>
+<g >
+<title>git_blame__like_git (46,046,046 samples, 0.33%)</title><rect x="73.8" y="485" width="3.8" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="76.79" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="277" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="287.5" ></text>
+</g>
+<g >
+<title>git_tree__parse_raw (104,104,104 samples, 0.74%)</title><rect x="183.0" y="501" width="8.7" height="15.0" fill="rgba(55,125,205,0.30)" rx="2" ry="2" />
+<text  x="186.01" y="511.5" ></text>
+</g>
+<g >
+<title>git__substrdup (2,002,002 samples, 0.01%)</title><rect x="73.5" y="485" width="0.1" height="15.0" fill="rgba(55,125,205,0.24)" rx="2" ry="2" />
+<text  x="76.46" y="495.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (4,004,004 samples, 0.03%)</title><rect x="103.4" y="469" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="106.43" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="54.2" y="197" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.17" y="207.5" ></text>
+</g>
+<g >
+<title>fstatat64 (4,004,004 samples, 0.03%)</title><rect x="55.3" y="469" width="0.3" height="15.0" fill="rgba(55,125,205,0.53)" rx="2" ry="2" />
+<text  x="58.26" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="373" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="479.5" ></text>
+</g>
+<g >
+<title>malloc@plt (2,002,002 samples, 0.01%)</title><rect x="82.2" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.87)" rx="2" ry="2" />
+<text  x="85.23" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (25,025,025 samples, 0.18%)</title><rect x="95.7" y="309" width="2.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="98.67" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="1189.3" y="261" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1192.33" y="271.5" ></text>
+</g>
+<g >
+<title>[unknown]  (2,002,002 samples, 0.01%)</title><rect x="10.2" y="309" width="0.1" height="15.0" fill="rgba(241,80,47,0.98)" rx="2" ry="2" />
+<text  x="13.17" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="431.5" ></text>
+</g>
+<g >
+<title>get_delta_base (2,002,002 samples, 0.01%)</title><rect x="97.8" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.79)" rx="2" ry="2" />
+<text  x="100.76" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="309" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="319.5" ></text>
+</g>
+<g >
+<title>git__calloc (45,045,045 samples, 0.32%)</title><rect x="98.1" y="501" width="3.7" height="15.0" fill="rgba(55,125,205,0.52)" rx="2" ry="2" />
+<text  x="101.09" y="511.5" ></text>
+</g>
+<g >
+<title>realloc (8,008,008 samples, 0.06%)</title><rect x="72.5" y="469" width="0.7" height="15.0" fill="rgba(241,80,47,0.86)" rx="2" ry="2" />
+<text  x="75.54" y="479.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_max (23,023,023 samples, 0.16%)</title><rect x="248.3" y="501" width="1.9" height="15.0" fill="rgba(55,125,205,0.33)" rx="2" ry="2" />
+<text  x="251.30" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="293" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="421" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="431.5" ></text>
+</g>
+<g >
+<title>inflate (510,510,510 samples, 3.61%)</title><rect x="193.7" y="485" width="42.6" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="196.70" y="495.5" >infl..</text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="197" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="207.5" ></text>
+</g>
+<g >
+<title>git_str_join (25,025,025 samples, 0.18%)</title><rect x="178.4" y="501" width="2.1" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="181.42" y="511.5" ></text>
+</g>
+<g >
+<title>similarity_measure (2,002,002 samples, 0.01%)</title><rect x="476.8" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.21)" rx="2" ry="2" />
+<text  x="479.84" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="261" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="271.5" ></text>
+</g>
+<g >
+<title>[unknown] (95,095,095 samples, 0.67%)</title><rect x="89.8" y="421" width="8.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.82" y="431.5" ></text>
+</g>
+<g >
+<title>stdalloc__malloc (3,003,003 samples, 0.02%)</title><rect x="477.3" y="501" width="0.3" height="15.0" fill="rgba(241,80,47,0.71)" rx="2" ry="2" />
+<text  x="480.34" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="111.1" y="389" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="114.12" y="399.5" ></text>
+</g>
+<g >
+<title>tree_iterator_free (2,002,002 samples, 0.01%)</title><rect x="490.5" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.91)" rx="2" ry="2" />
+<text  x="493.53" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="437" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="447.5" ></text>
+</g>
+<g >
+<title>git_error_vset (3,003,003 samples, 0.02%)</title><rect x="153.6" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.24)" rx="2" ry="2" />
+<text  x="156.62" y="511.5" ></text>
+</g>
+<g >
+<title>git_index_entry_is_conflict (3,003,003 samples, 0.02%)</title><rect x="164.1" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="167.14" y="511.5" ></text>
+</g>
+<g >
+<title>git_signature__parse (2,002,002 samples, 0.01%)</title><rect x="81.9" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.60)" rx="2" ry="2" />
+<text  x="84.89" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="55.3" y="405" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.34" y="415.5" ></text>
+</g>
+<g >
+<title>git_oid_from_raw (40,040,040 samples, 0.28%)</title><rect x="168.3" y="501" width="3.4" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="171.31" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (5,005,005 samples, 0.04%)</title><rect x="112.9" y="453" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="115.87" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="55.3" y="453" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.26" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (6,006,006 samples, 0.04%)</title><rect x="84.4" y="277" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.40" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="213" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="223.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (7,007,007 samples, 0.05%)</title><rect x="142.5" y="469" width="0.6" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="145.51" y="479.5" ></text>
+</g>
+<g >
+<title>rcu_sched (3,003,003 samples, 0.02%)</title><rect x="581.6" y="517" width="0.3" height="15.0" fill="rgba(55,125,205,0.37)" rx="2" ry="2" />
+<text  x="584.63" y="527.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (13,013,013 samples, 0.09%)</title><rect x="161.8" y="405" width="1.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="164.80" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="293" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="54.2" y="213" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.17" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (2,002,002 samples, 0.01%)</title><rect x="83.1" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.62)" rx="2" ry="2" />
+<text  x="86.14" y="495.5" ></text>
+</g>
+<g >
+<title>git_packfile_unpack_header (17,017,017 samples, 0.12%)</title><rect x="80.1" y="485" width="1.5" height="15.0" fill="rgba(55,125,205,0.57)" rx="2" ry="2" />
+<text  x="83.14" y="495.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_min (44,044,044 samples, 0.31%)</title><rect x="250.2" y="501" width="3.7" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="253.23" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="153.3" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="156.28" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (8,008,008 samples, 0.06%)</title><rect x="42.3" y="325" width="0.7" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.31" y="335.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (2,002,002 samples, 0.01%)</title><rect x="260.4" y="165" width="0.2" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.41" y="175.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="469" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="262.0" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="265.00" y="463.5" ></text>
+</g>
+<g >
+<title>git_cache_oidmap__resize (2,002,002 samples, 0.01%)</title><rect x="141.9" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="144.93" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (8,008,008 samples, 0.06%)</title><rect x="42.3" y="341" width="0.7" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="45.31" y="351.5" ></text>
+</g>
+<g >
+<title>git_config_list_get (3,003,003 samples, 0.02%)</title><rect x="66.4" y="469" width="0.3" height="15.0" fill="rgba(55,125,205,0.51)" rx="2" ry="2" />
+<text  x="69.44" y="479.5" ></text>
+</g>
+<g >
+<title>git_diff__from_iterators (2,002,002 samples, 0.01%)</title><rect x="78.9" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.41)" rx="2" ry="2" />
+<text  x="81.89" y="495.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="182.4" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="185.42" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="81.2" y="357" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.22" y="367.5" ></text>
+</g>
+<g >
+<title>malloc (3,003,003 samples, 0.02%)</title><rect x="55.6" y="453" width="0.2" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="58.59" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="54.1" y="261" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.09" y="271.5" ></text>
+</g>
+<g >
+<title>malloc (18,018,018 samples, 0.13%)</title><rect x="149.9" y="485" width="1.5" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="152.94" y="495.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (5,005,005 samples, 0.04%)</title><rect x="259.4" y="245" width="0.4" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.41" y="255.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="149" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown] (16,016,016 samples, 0.11%)</title><rect x="41.6" y="437" width="1.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="44.65" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="501" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="511.5" ></text>
+</g>
+<g >
+<title>entry_fromname (2,002,002 samples, 0.01%)</title><rect x="88.7" y="501" width="0.1" height="15.0" fill="rgba(55,125,205,0.27)" rx="2" ry="2" />
+<text  x="91.66" y="511.5" ></text>
+</g>
+<g >
+<title>cfree (11,011,011 samples, 0.08%)</title><rect x="172.8" y="485" width="0.9" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="175.82" y="495.5" ></text>
+</g>
+<g >
+<title>git_object_id (2,002,002 samples, 0.01%)</title><rect x="79.1" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.80)" rx="2" ry="2" />
+<text  x="82.14" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="165" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="175.5" ></text>
+</g>
+<g >
+<title>malloc@plt (2,002,002 samples, 0.01%)</title><rect x="258.6" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.87)" rx="2" ry="2" />
+<text  x="261.57" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="357" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="367.5" ></text>
+</g>
+<g >
+<title>git_pathspec__match (4,004,004 samples, 0.03%)</title><rect x="174.6" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.25)" rx="2" ry="2" />
+<text  x="177.58" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="69" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="79.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="181" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.0" y="421" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.96" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="11.2" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.17" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="245" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="255.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.3] (352,352,352 samples, 2.49%)</title><rect x="202.6" y="469" width="29.4" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="205.63" y="479.5" >[l..</text>
+</g>
+<g >
+<title>malloc (8,008,008 samples, 0.06%)</title><rect x="177.0" y="485" width="0.7" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="180.00" y="495.5" ></text>
+</g>
+<g >
+<title>OSSL_DECODER_CTX_add_extra (7,007,007 samples, 0.05%)</title><rect x="259.2" y="293" width="0.6" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="262.24" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="405" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,289,289,282 samples, 51.53%)</title><rect x="581.9" y="437" width="608.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.88" y="447.5" >[unknown]</text>
+</g>
+<g >
+<title>git_config__configmap_lookup (2,002,002 samples, 0.01%)</title><rect x="65.6" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.44)" rx="2" ry="2" />
+<text  x="68.61" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (80,080,080 samples, 0.57%)</title><rect x="91.1" y="357" width="6.7" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="94.08" y="367.5" ></text>
+</g>
+<g >
+<title>[libssl.so.3] (2,002,002 samples, 0.01%)</title><rect x="259.1" y="469" width="0.1" height="15.0" fill="rgba(241,80,47,0.90)" rx="2" ry="2" />
+<text  x="262.08" y="479.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (21,021,021 samples, 0.15%)</title><rect x="100.1" y="469" width="1.7" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="103.09" y="479.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (13,013,013 samples, 0.09%)</title><rect x="165.5" y="469" width="1.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="168.47" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="405" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="415.5" ></text>
+</g>
+<g >
+<title>stdalloc__realloc (2,002,002 samples, 0.01%)</title><rect x="477.6" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.95)" rx="2" ry="2" />
+<text  x="480.59" y="511.5" ></text>
+</g>
+<g >
+<title>git_odb_object__free (5,005,005 samples, 0.04%)</title><rect x="166.6" y="501" width="0.4" height="15.0" fill="rgba(241,80,47,0.81)" rx="2" ry="2" />
+<text  x="169.56" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (5,005,005 samples, 0.04%)</title><rect x="162.2" y="389" width="0.4" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="165.22" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="453" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="463.5" ></text>
+</g>
+<g >
+<title>kworker/2:0-eve (2,002,002 samples, 0.01%)</title><rect x="581.2" y="517" width="0.2" height="15.0" fill="rgba(241,80,47,0.93)" rx="2" ry="2" />
+<text  x="584.21" y="527.5" ></text>
+</g>
+<g >
+<title>xdl_prepare_env (2,002,002 samples, 0.01%)</title><rect x="580.4" y="501" width="0.1" height="15.0" fill="rgba(241,80,47,0.77)" rx="2" ry="2" />
+<text  x="583.38" y="511.5" ></text>
+</g>
+<g >
+<title>stdalloc__free (3,003,003 samples, 0.02%)</title><rect x="477.1" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.43)" rx="2" ry="2" />
+<text  x="480.09" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (4,004,004 samples, 0.03%)</title><rect x="240.2" y="421" width="0.3" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="243.21" y="431.5" ></text>
+</g>
+<g >
+<title>git_odb_object__free (3,003,003 samples, 0.02%)</title><rect x="67.9" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.81)" rx="2" ry="2" />
+<text  x="70.86" y="479.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (7,007,007 samples, 0.05%)</title><rect x="72.6" y="453" width="0.6" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="75.62" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="55.4" y="325" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.42" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (88,088,088 samples, 0.62%)</title><rect x="90.4" y="373" width="7.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="93.41" y="383.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="151.1" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="154.11" y="463.5" ></text>
+</g>
+<g >
+<title>git__prefixcmp (16,016,016 samples, 0.11%)</title><rect x="101.8" y="501" width="1.4" height="15.0" fill="rgba(241,80,47,0.94)" rx="2" ry="2" />
+<text  x="104.85" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="81.4" y="309" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.39" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="84.5" y="245" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.48" y="255.5" ></text>
+</g>
+<g >
+<title>OSSL_DECODER_CTX_new_for_pkey (17,017,017 samples, 0.12%)</title><rect x="259.2" y="309" width="1.5" height="15.0" fill="rgba(241,80,47,0.79)" rx="2" ry="2" />
+<text  x="262.24" y="319.5" ></text>
+</g>
+<g >
+<title>git_str_try_grow (6,006,006 samples, 0.04%)</title><rect x="181.8" y="501" width="0.5" height="15.0" fill="rgba(241,80,47,0.85)" rx="2" ry="2" />
+<text  x="184.84" y="511.5" ></text>
+</g>
+<g >
+<title>cfree (3,003,003 samples, 0.02%)</title><rect x="191.9" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="194.86" y="495.5" ></text>
+</g>
+<g >
+<title>git2 (6,821,821,815 samples, 48.22%)</title><rect x="11.5" y="517" width="569.0" height="15.0" fill="rgba(241,80,47,0.88)" rx="2" ry="2" />
+<text  x="14.50" y="527.5" >git2</text>
+</g>
+<g >
+<title>cfree (2,002,002 samples, 0.01%)</title><rect x="153.3" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="156.28" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_rwlock_wrlock (2,002,002 samples, 0.01%)</title><rect x="87.0" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.58)" rx="2" ry="2" />
+<text  x="89.99" y="495.5" ></text>
+</g>
+<g >
+<title>config_snapshot_get (2,002,002 samples, 0.01%)</title><rect x="54.8" y="469" width="0.1" height="15.0" fill="rgba(55,125,205,0.35)" rx="2" ry="2" />
+<text  x="57.76" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="55.3" y="341" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.34" y="351.5" ></text>
+</g>
+<g >
+<title>git_commit__free (8,008,008 samples, 0.06%)</title><rect x="142.4" y="501" width="0.7" height="15.0" fill="rgba(241,80,47,0.71)" rx="2" ry="2" />
+<text  x="145.43" y="511.5" ></text>
+</g>
+<g >
+<title>git_object_id (7,007,007 samples, 0.05%)</title><rect x="67.3" y="469" width="0.6" height="15.0" fill="rgba(241,80,47,0.80)" rx="2" ry="2" />
+<text  x="70.28" y="479.5" ></text>
+</g>
+<g >
+<title>EVP_KEYMGMT_do_all_provided (3,003,003 samples, 0.02%)</title><rect x="259.9" y="277" width="0.3" height="15.0" fill="rgba(241,80,47,0.80)" rx="2" ry="2" />
+<text  x="262.91" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="389" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="581.6" y="421" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.63" y="431.5" ></text>
+</g>
+<g >
+<title>git_config_list_add_string (27,027,027 samples, 0.19%)</title><rect x="143.4" y="501" width="2.3" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="146.43" y="511.5" ></text>
+</g>
+<g >
+<title>malloc (2,002,002 samples, 0.01%)</title><rect x="81.6" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="84.64" y="479.5" ></text>
+</g>
+<g >
+<title>cfree (3,003,003 samples, 0.02%)</title><rect x="67.9" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="70.86" y="463.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="389" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="81.1" y="437" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="84.14" y="447.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="421" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" ></text>
+</g>
+<g >
+<title>git__reallocarray (23,023,023 samples, 0.16%)</title><rect x="71.3" y="485" width="1.9" height="15.0" fill="rgba(55,125,205,0.41)" rx="2" ry="2" />
+<text  x="74.29" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="495.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (4,004,004 samples, 0.03%)</title><rect x="260.3" y="213" width="0.4" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.33" y="223.5" ></text>
+</g>
+<g >
+<title>git_str_vprintf (3,003,003 samples, 0.02%)</title><rect x="182.3" y="501" width="0.3" height="15.0" fill="rgba(241,80,47,0.84)" rx="2" ry="2" />
+<text  x="185.34" y="511.5" ></text>
+</g>
+<g >
+<title>git_config_list_dup (3,003,003 samples, 0.02%)</title><rect x="146.2" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.38)" rx="2" ry="2" />
+<text  x="149.19" y="511.5" ></text>
+</g>
+<g >
+<title>git_str_clear (3,003,003 samples, 0.02%)</title><rect x="177.9" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.31)" rx="2" ry="2" />
+<text  x="180.92" y="511.5" ></text>
+</g>
+<g >
+<title>cfree (3,003,003 samples, 0.02%)</title><rect x="68.3" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="71.28" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="421" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="431.5" ></text>
+</g>
+<g >
+<title>git_blob__free (2,002,002 samples, 0.01%)</title><rect x="65.2" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.89)" rx="2" ry="2" />
+<text  x="68.19" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="373" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="383.5" ></text>
+</g>
+<g >
+<title>malloc (2,002,002 samples, 0.01%)</title><rect x="240.8" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="243.79" y="495.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (84,084,084 samples, 0.59%)</title><rect x="104.3" y="469" width="7.0" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="107.27" y="479.5" ></text>
+</g>
+<g >
+<title>[ld-linux-x86-64.so.2] (2,002,002 samples, 0.01%)</title><rect x="13.8" y="453" width="0.1" height="15.0" fill="rgba(241,80,47,0.82)" rx="2" ry="2" />
+<text  x="16.76" y="463.5" ></text>
+</g>
+<g >
+<title>tree_iterator_frame_pop (7,007,007 samples, 0.05%)</title><rect x="489.9" y="501" width="0.6" height="15.0" fill="rgba(241,80,47,0.81)" rx="2" ry="2" />
+<text  x="492.87" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="341" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (8,008,008 samples, 0.06%)</title><rect x="97.1" y="293" width="0.7" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="100.09" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="54.2" y="229" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.17" y="239.5" ></text>
+</g>
+<g >
+<title>clear_cache (5,005,005 samples, 0.04%)</title><rect x="87.3" y="501" width="0.4" height="15.0" fill="rgba(55,125,205,0.40)" rx="2" ry="2" />
+<text  x="90.32" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="55.3" y="389" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="58.34" y="399.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="501" width="0.3" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>inflateEnd (2,002,002 samples, 0.01%)</title><rect x="262.0" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.72)" rx="2" ry="2" />
+<text  x="265.00" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="373" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="383.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (7,007,007 samples, 0.05%)</title><rect x="173.7" y="469" width="0.6" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="176.74" y="479.5" ></text>
+</g>
+<g >
+<title>adler32_z (51,051,051 samples, 0.36%)</title><rect x="232.0" y="469" width="4.3" height="15.0" fill="rgba(241,80,47,0.92)" rx="2" ry="2" />
+<text  x="235.02" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="277" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="111.1" y="405" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="114.12" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="405" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="415.5" ></text>
+</g>
+<g >
+<title>snprintf (13,013,013 samples, 0.09%)</title><rect x="165.5" y="485" width="1.1" height="15.0" fill="rgba(241,80,47,0.97)" rx="2" ry="2" />
+<text  x="168.47" y="495.5" ></text>
+</g>
+<g >
+<title>cfree (3,003,003 samples, 0.02%)</title><rect x="87.5" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="90.49" y="495.5" ></text>
+</g>
+<g >
+<title>git_hashsig_create (43,043,043 samples, 0.30%)</title><rect x="160.5" y="501" width="3.6" height="15.0" fill="rgba(241,80,47,0.71)" rx="2" ry="2" />
+<text  x="163.55" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="110.9" y="453" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="113.95" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="453" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="463.5" ></text>
+</g>
+<g >
+<title>cfree (2,002,002 samples, 0.01%)</title><rect x="262.0" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="265.00" y="479.5" ></text>
+</g>
+<g >
+<title>git_odb__hashobj (15,015,015 samples, 0.11%)</title><rect x="165.3" y="501" width="1.3" height="15.0" fill="rgba(241,80,47,0.69)" rx="2" ry="2" />
+<text  x="168.31" y="511.5" ></text>
+</g>
+<g >
+<title>pthread_rwlock_unlock (5,005,005 samples, 0.04%)</title><rect x="86.0" y="485" width="0.4" height="15.0" fill="rgba(55,125,205,0.40)" rx="2" ry="2" />
+<text  x="88.98" y="495.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (5,005,005 samples, 0.04%)</title><rect x="260.2" y="261" width="0.5" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="263.24" y="271.5" ></text>
+</g>
+<g >
+<title>git_oid_equal (12,012,012 samples, 0.08%)</title><rect x="167.3" y="501" width="1.0" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="170.31" y="511.5" ></text>
+</g>
+<g >
+<title>malloc (2,002,002 samples, 0.01%)</title><rect x="83.6" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.61)" rx="2" ry="2" />
+<text  x="86.65" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,004,004 samples, 0.03%)</title><rect x="54.0" y="325" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="57.00" y="335.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="182.8" y="469" width="0.1" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="185.76" y="479.5" ></text>
+</g>
+<g >
+<title>git_config_list_headmap__resize (6,006,006 samples, 0.04%)</title><rect x="78.4" y="485" width="0.5" height="15.0" fill="rgba(55,125,205,0.32)" rx="2" ry="2" />
+<text  x="81.39" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="177.4" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="180.41" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="325" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="335.5" ></text>
+</g>
+<g >
+<title>git_pool_malloc (31,031,031 samples, 0.22%)</title><rect x="175.1" y="501" width="2.6" height="15.0" fill="rgba(55,125,205,0.20)" rx="2" ry="2" />
+<text  x="178.08" y="511.5" ></text>
+</g>
+<g >
+<title>git__strntol64 (260,260,260 samples, 1.84%)</title><rect x="120.1" y="501" width="21.7" height="15.0" fill="rgba(55,125,205,0.20)" rx="2" ry="2" />
+<text  x="123.13" y="511.5" >g..</text>
+</g>
+<g >
+<title>git_str_dispose (2,002,002 samples, 0.01%)</title><rect x="178.2" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.30)" rx="2" ry="2" />
+<text  x="181.25" y="511.5" ></text>
+</g>
+<g >
+<title>git_str_putc (2,002,002 samples, 0.01%)</title><rect x="180.5" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.86)" rx="2" ry="2" />
+<text  x="183.50" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="581.2" y="501" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="584.21" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="309" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="319.5" ></text>
+</g>
+<g >
+<title>xdl_hash_record (17,017,017 samples, 0.12%)</title><rect x="579.0" y="501" width="1.4" height="15.0" fill="rgba(55,125,205,0.54)" rx="2" ry="2" />
+<text  x="581.96" y="511.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3] (21,021,021 samples, 0.15%)</title><rect x="259.2" y="469" width="1.8" height="15.0" fill="rgba(241,80,47,0.68)" rx="2" ry="2" />
+<text  x="262.24" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="421" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="431.5" ></text>
+</g>
+<g >
+<title>sha1_process (283,283,283 samples, 2.00%)</title><rect x="453.2" y="501" width="23.6" height="15.0" fill="rgba(241,80,47,0.72)" rx="2" ry="2" />
+<text  x="456.21" y="511.5" >s..</text>
+</g>
+<g >
+<title>[libc.so.6] (3,003,003 samples, 0.02%)</title><rect x="73.2" y="453" width="0.3" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="76.21" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_rwlock_rdlock (5,005,005 samples, 0.04%)</title><rect x="85.6" y="485" width="0.4" height="15.0" fill="rgba(241,80,47,0.94)" rx="2" ry="2" />
+<text  x="88.57" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="174.2" y="293" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="177.16" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="341" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="229" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (95,095,095 samples, 0.67%)</title><rect x="89.8" y="437" width="8.0" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="92.82" y="447.5" ></text>
+</g>
+<g >
+<title>cfree (2,002,002 samples, 0.01%)</title><rect x="177.7" y="485" width="0.2" height="15.0" fill="rgba(55,125,205,0.50)" rx="2" ry="2" />
+<text  x="180.75" y="495.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="485" width="0.3" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (90,090,090 samples, 0.64%)</title><rect x="43.0" y="485" width="7.5" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="45.98" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="10.6" y="437" width="0.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="13.58" y="447.5" ></text>
+</g>
+<g >
+<title>git__unescape (2,002,002 samples, 0.01%)</title><rect x="73.6" y="485" width="0.2" height="15.0" fill="rgba(241,80,47,0.75)" rx="2" ry="2" />
+<text  x="76.63" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_getspecific (2,002,002 samples, 0.01%)</title><rect x="262.2" y="501" width="0.1" height="15.0" fill="rgba(55,125,205,0.33)" rx="2" ry="2" />
+<text  x="265.17" y="511.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="405" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (5,005,005 samples, 0.04%)</title><rect x="580.5" y="485" width="0.5" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.54" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.0" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.00" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="11.3" y="373" width="0.1" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="14.25" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="341" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="1189.7" y="229" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1192.67" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (17,017,017 samples, 0.12%)</title><rect x="1188.5" y="341" width="1.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1191.50" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,002,002 samples, 0.01%)</title><rect x="580.8" y="357" width="0.2" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="583.80" y="367.5" ></text>
+</g>
+<g >
+<title>git_error_clear (2,002,002 samples, 0.01%)</title><rect x="153.5" y="501" width="0.1" height="15.0" fill="rgba(55,125,205,0.31)" rx="2" ry="2" />
+<text  x="156.45" y="511.5" ></text>
+</g>
+<g >
+<title>ubc_check (1,056,056,055 samples, 7.47%)</title><rect x="490.7" y="501" width="88.1" height="15.0" fill="rgba(55,125,205,0.55)" rx="2" ry="2" />
+<text  x="493.70" y="511.5" >ubc_check</text>
+</g>
+<g >
+<title>get_entry (2,002,002 samples, 0.01%)</title><rect x="97.9" y="501" width="0.2" height="15.0" fill="rgba(241,80,47,0.96)" rx="2" ry="2" />
+<text  x="100.92" y="511.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (30,030,030 samples, 0.21%)</title><rect x="161.2" y="437" width="2.5" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="164.22" y="447.5" ></text>
+</g>
+<g >
+<title>git__calloc (3,003,003 samples, 0.02%)</title><rect x="55.6" y="469" width="0.2" height="15.0" fill="rgba(55,125,205,0.52)" rx="2" ry="2" />
+<text  x="58.59" y="479.5" ></text>
+</g>
+<g >
+<title>OSSL_DECODER_do_all_provided (5,005,005 samples, 0.04%)</title><rect x="260.2" y="277" width="0.5" height="15.0" fill="rgba(241,80,47,0.85)" rx="2" ry="2" />
+<text  x="263.24" y="287.5" ></text>
+</g>
+<g >
+<title>[libcoreclr.so] (4,004,004 samples, 0.03%)</title><rect x="10.0" y="373" width="0.3" height="15.0" fill="rgba(241,80,47,0.76)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" ></text>
+</g>
+<g >
+<title>git_cached_obj_decref (3,003,003 samples, 0.02%)</title><rect x="65.4" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.65)" rx="2" ry="2" />
+<text  x="68.36" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (7,007,007 samples, 0.05%)</title><rect x="84.3" y="309" width="0.6" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="87.31" y="319.5" ></text>
+</g>
+<g >
+<title>git_tree__free (3,003,003 samples, 0.02%)</title><rect x="68.3" y="469" width="0.2" height="15.0" fill="rgba(241,80,47,0.74)" rx="2" ry="2" />
+<text  x="71.28" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (17,017,017 samples, 0.12%)</title><rect x="1188.5" y="325" width="1.4" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="1191.50" y="335.5" ></text>
+</g>
+<g >
+<title>hashsig_cmp_max (2,002,002 samples, 0.01%)</title><rect x="162.5" y="373" width="0.1" height="15.0" fill="rgba(55,125,205,0.33)" rx="2" ry="2" />
+<text  x="165.47" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,003,003 samples, 0.02%)</title><rect x="240.5" y="325" width="0.3" height="15.0" fill="rgba(55,125,205,0.29)" rx="2" ry="2" />
+<text  x="243.54" y="335.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2,002,002 samples, 0.01%)</title><rect x="166.4" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="169.39" y="447.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (3,003,003 samples, 0.02%)</title><rect x="72.3" y="437" width="0.2" height="15.0" fill="rgba(55,125,205,0.49)" rx="2" ry="2" />
+<text  x="75.29" y="447.5" ></text>
+</g>
+</g>
+</svg>
